@@ -100,9 +100,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 
 public class TestResultStorageJunitTest {
-    
+
     @ClassRule public static BuildWatcher buildWatcher = new BuildWatcher();
-    
+
     @Rule public JenkinsRule r = new JenkinsRule();
 
     /**
@@ -193,7 +193,7 @@ public class TestResultStorageJunitTest {
             assertEquals(1, passedTests.size());
             assertEquals("Klazz", passedTests.get(0).getClassName());
             assertEquals("test2", passedTests.get(0).getName());
-            
+
             PackageResult another = a.getResult().byPackage("another");
             List<CaseResult> packageFailedTests = another.getFailedTests();
             assertEquals(1, packageFailedTests.size());
@@ -224,7 +224,7 @@ public class TestResultStorageJunitTest {
 
             final List<TestDurationResultSummary> testDurationResultSummary = pluggableStorage.getTestDurationResultSummary();
             assertThat(testDurationResultSummary.get(0).getDuration(), is(200));
-            
+
             // TODO test result summary i.e. failure content
             // TODO getFailedSinceRun, TestResult#getChildren, TestObject#getTestResultAction
             // TODO more detailed Java queries incl. ClassResult
@@ -373,7 +373,7 @@ public class TestResultStorageJunitTest {
 
                                     classResults.put(className, classResult);
                                     packageResult.add(caseResult);
-                                    
+
                                     results.put(packageName, packageResult);
                                 }
                                 classResults.values().forEach(ClassResult::tally);
@@ -419,7 +419,7 @@ public class TestResultStorageJunitTest {
                                 List<TestDurationResultSummary> testDurationResultSummaries = new ArrayList<>();
                                 while (result.next()) {
                                     int buildNumber = result.getInt("build");
-                                    int duration = result.getInt("duration");
+                                    float duration = result.getFloat("duration");
 
                                     testDurationResultSummaries.add(new TestDurationResultSummary(buildNumber, duration));
                                 }
@@ -444,7 +444,8 @@ public class TestResultStorageJunitTest {
                                 List<HistoryTestResultSummary> historyTestResultSummaries = new ArrayList<>();
                                 while (result.next()) {
                                     int buildNumber = result.getInt("build");
-                                    int duration = result.getInt("duration");
+                                    float duration = result.getFloat("duration");
+                                    System.out.println("TestResultStorageJunitTest: buildNumber = " + buildNumber + " ; duration = " + duration);
                                     int passed = result.getInt("passCount");
                                     int failed = result.getInt("failCount");
                                     int skipped = result.getInt("skipCount");
@@ -500,7 +501,7 @@ public class TestResultStorageJunitTest {
                                     SuiteResult suiteResult = new SuiteResult(suite, null, null, null);
                                     suiteResult.setParent(new TestResult(this));
                                     CaseResult caseResult = new CaseResult(suiteResult, className, testName, errorDetails, skipped, duration, stdout, stderr, stacktrace);
-                                    
+
                                     ClassResult classResult = classResults.get(className);
                                     if (classResult == null) {
                                         classResult = new ClassResult(packageResult, className);
@@ -508,7 +509,7 @@ public class TestResultStorageJunitTest {
                                     classResult.add(caseResult);
                                     classResults.put(className, classResult);
                                     caseResult.setClass(classResult);
-                                    
+
                                     packageResult.add(caseResult);
                                 }
                                 classResults.values().forEach(ClassResult::tally);
@@ -519,7 +520,7 @@ public class TestResultStorageJunitTest {
                     });
 
                 }
-                
+
                 @Override
                 public Run<?, ?> getFailedSinceRun(CaseResult caseResult) {
                     return query(connection -> {
@@ -549,7 +550,7 @@ public class TestResultStorageJunitTest {
                                 if (!hasPassed) {
                                     return theJob.getBuildByNumber(1);
                                 }
-                                
+
                                 lastPassingBuildNumber = result.getInt("build");
                             }
                         }
@@ -584,7 +585,7 @@ public class TestResultStorageJunitTest {
                     });
 
                 }
-                
+
                 @Override
                 public String getJobName() {
                     return job;
@@ -634,7 +635,7 @@ public class TestResultStorageJunitTest {
                 private List<CaseResult> getCaseResults(String column) {
                     return retrieveCaseResult(column + " IS NOT NULL");
                 }
-                
+
                 @Override
                 public SuiteResult getSuite(String name) {
                     return query(connection -> {
@@ -754,7 +755,7 @@ public class TestResultStorageJunitTest {
                 }
 
                 @NonNull
-                @Override 
+                @Override
                 public TestResult getResultByNodes(@NonNull List<String> nodeIds) {
                     return new TestResult(this); // TODO
                 }
