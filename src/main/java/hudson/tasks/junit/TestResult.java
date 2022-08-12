@@ -24,8 +24,6 @@
 package hudson.tasks.junit;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import hudson.AbortException;
-import hudson.Util;
 import hudson.model.Run;
 import io.jenkins.plugins.junit.storage.TestResultImpl;
 import hudson.tasks.test.AbstractTestResultAction;
@@ -39,22 +37,29 @@ import java.io.File;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.TreeMap;
-import javax.annotation.CheckForNull;
+import edu.umd.cs.findbugs.annotations.CheckForNull;
 
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.tools.ant.DirectoryScanner;
 import org.dom4j.DocumentException;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
 import org.kohsuke.stapler.export.Exported;
 
-import javax.annotation.Nonnull;
+import edu.umd.cs.findbugs.annotations.NonNull;
 
 /**
  * Root of all the test results for one build.
@@ -62,6 +67,9 @@ import javax.annotation.Nonnull;
  * @author Kohsuke Kawaguchi
  */
 public final class TestResult extends MetaTabulatedResult {
+
+
+    private static final Logger LOGGER = Logger.getLogger(JUnitResultArchiver.class.getName());
 
     @SuppressFBWarnings(value = "SE_BAD_FIELD", justification = "We do not expect TestResult to be serialized when this field is set.")
     private final @CheckForNull TestResultImpl impl;
@@ -73,9 +81,9 @@ public final class TestResult extends MetaTabulatedResult {
     private final List<SuiteResult> suites = new ArrayList<>();
 
     /**
-     * {@link #suites} keyed by their names for faster lookup.
+     * {@link #suites} keyed by their names for faster lookup. Since multiple suites can have the same name, holding a collection.
      */
-    private transient Map<String,SuiteResult> suitesByName;
+    private transient Map<String, Collection<SuiteResult>> suitesByName;
 
     /**
      * {@link #suites} keyed by their node ID for faster lookup. May be empty.
@@ -105,12 +113,17 @@ public final class TestResult extends MetaTabulatedResult {
 
     private float duration;
 
+    private boolean skipOldReports;
+
     /**
      * Number of failed/error leafNodes.
      */
     private transient List<CaseResult> failedTests;
 
     private final boolean keepLongStdio;
+
+    // default 3s as it depends on OS some can be good some not really....
+    public static final long FILE_TIME_PRECISION_MARGIN = Long.getLong(TestResult.class.getName() + "filetime.precision.margin", 3000);
 
     /**
      * Creates an empty result.
@@ -128,27 +141,37 @@ public final class TestResult extends MetaTabulatedResult {
     }
 
     @Deprecated
-    public TestResult(long buildTime, DirectoryScanner results) throws IOException {
-        this(buildTime, results, false);
+    public TestResult(long filesTimestamp, DirectoryScanner results) throws IOException {
+        this(filesTimestamp, results, false);
     }
 
     @Deprecated
-    public TestResult(long buildTime, DirectoryScanner results, boolean keepLongStdio) throws IOException {
-        this(buildTime, results, keepLongStdio, null);
+    public TestResult(long filesTimestamp, DirectoryScanner results, boolean keepLongStdio) throws IOException {
+        this(filesTimestamp, results, keepLongStdio, null);
     }
 
-    /**
-     * Collect reports from the given {@link DirectoryScanner}, while
-     * filtering out all files that were created before the given time.
-     * @param keepLongStdio if true, retain a suite's complete stdout/stderr even if this is huge and the suite passed
-     * @param pipelineTestDetails A {@link PipelineTestDetails} instance containing Pipeline-related additional arguments.
-     * @since 1.22
-     */
-    public TestResult(long buildTime, DirectoryScanner results, boolean keepLongStdio,
+    @Deprecated
+    public TestResult(long filesTimestamp, DirectoryScanner results, boolean keepLongStdio,
                       PipelineTestDetails pipelineTestDetails) throws IOException {
         this.keepLongStdio = keepLongStdio;
         impl = null;
-        parse(buildTime, results, pipelineTestDetails);
+        parse(filesTimestamp, results, pipelineTestDetails);
+    }
+    /**
+     * Collect reports from the given {@link DirectoryScanner}, while
+     * filtering out all files that were created before the given time.
+     * @param filesTimestamp per default files older than this will be ignored (depending on param skipOldReports)
+     * @param keepLongStdio if true, retain a suite's complete stdout/stderr even if this is huge and the suite passed
+     * @param pipelineTestDetails A {@link PipelineTestDetails} instance containing Pipeline-related additional arguments.
+     * @param skipOldReports to parse or not test files older than filesTimestamp
+     * @since 1.22
+     */
+    public TestResult(long filesTimestamp, DirectoryScanner results, boolean keepLongStdio,
+                      PipelineTestDetails pipelineTestDetails, boolean skipOldReports) throws IOException {
+        this.keepLongStdio = keepLongStdio;
+        impl = null;
+        this.skipOldReports = skipOldReports;
+        parse(filesTimestamp, results, pipelineTestDetails);
     }
 
     public TestResult(TestResultImpl impl) {
@@ -161,6 +184,7 @@ public final class TestResult extends MetaTabulatedResult {
         return impl;
     }
 
+    @Override
     public TestObject getParent() {
     	return parent;
     }
@@ -176,36 +200,36 @@ public final class TestResult extends MetaTabulatedResult {
     }
 
     @Deprecated
-    public void parse(long buildTime, DirectoryScanner results) throws IOException {
-        parse(buildTime, results, null);
+    public void parse(long filesTimestamp, DirectoryScanner results) throws IOException {
+        parse(filesTimestamp, results, null);
     }
 
     /**
      * Collect reports from the given {@link DirectoryScanner}, while
      * filtering out all files that were created before the given time.
-     * @param buildTime Build time.
+     * @param filesTimestamp file timestamp to filter files older.
      * @param results Directory scanner.
      * @param pipelineTestDetails A {@link PipelineTestDetails} instance containing Pipeline-related additional arguments.
      *
      * @throws IOException if an error occurs.
      * @since 1.22
      */
-    public void parse(long buildTime, DirectoryScanner results, PipelineTestDetails pipelineTestDetails) throws IOException {
+    public void parse(long filesTimestamp, DirectoryScanner results, PipelineTestDetails pipelineTestDetails) throws IOException {
         String[] includedFiles = results.getIncludedFiles();
         File baseDir = results.getBasedir();
-        parse(buildTime,baseDir, pipelineTestDetails,includedFiles);
+        parse(filesTimestamp,baseDir, pipelineTestDetails,includedFiles);
     }
 
     @Deprecated
-    public void parse(long buildTime, File baseDir, String[] reportFiles)
+    public void parse(long filesTimestamp, File baseDir, String[] reportFiles)
             throws IOException {
-        parse(buildTime, baseDir, null, reportFiles);
+        parse(filesTimestamp, baseDir, null, reportFiles);
     }
 
     /**
      * Collect reports from the given report files, while
      * filtering out all files that were created before the given time.
-     * @param buildTime Build time.
+     * @param filesTimestamp file timestamp to filter files older.
      * @param baseDir Base directory.
      * @param pipelineTestDetails A {@link PipelineTestDetails} instance containing Pipeline-related additional arguments.
      * @param reportFiles Report files.
@@ -213,35 +237,25 @@ public final class TestResult extends MetaTabulatedResult {
      * @throws IOException if an error occurs.
      * @since 1.22
      */
-    public void parse(long buildTime, File baseDir, PipelineTestDetails pipelineTestDetails, String[] reportFiles) throws IOException {
+    public void parse(long filesTimestamp, File baseDir, PipelineTestDetails pipelineTestDetails, String[] reportFiles) throws IOException {
+        List<File> files = Arrays.stream(reportFiles).map(s -> new File(baseDir, s)).collect(Collectors.toList());
+        parse(filesTimestamp, pipelineTestDetails, files);
 
-        boolean parsed=false;
+    }
 
-        for (String value : reportFiles) {
-            File reportFile = new File(baseDir, value);
-            // only count files that were actually updated during this build
-            if (buildTime-3000/*error margin*/ <= reportFile.lastModified()) {
-                parsePossiblyEmpty(reportFile, pipelineTestDetails);
-                parsed = true;
+    private void parse(long filesTimestamp, PipelineTestDetails pipelineTestDetails, Iterable<File> reportFiles) throws IOException {
+        for (File reportFile : reportFiles) {
+            if(skipOldReports && Files.getLastModifiedTime(reportFile.toPath()).toMillis() < filesTimestamp - FILE_TIME_PRECISION_MARGIN ) {
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    LOGGER.fine("file " + reportFile + " not parsed: skipOldReports-" + skipOldReports
+                            + ",lastModified:" + Files.getLastModifiedTime(reportFile.toPath()).toMillis() + ",filesTimestamp:" + filesTimestamp);
+                }
+                continue;
             }
+            // only count files that were actually updated during this build
+            parsePossiblyEmpty(reportFile, pipelineTestDetails);
         }
-
-        if(!parsed) {
-            long localTime = System.currentTimeMillis();
-            if(localTime < buildTime-1000) /*margin*/
-                // build time is in the the future. clock on this agent must be running behind
-                throw new AbortException(
-                    "Clock on this agent is out of sync with the controller, and therefore \n" +
-                    "I can't figure out what test results are new and what are old.\n" +
-                    "Please keep the agent clock in sync with the controller.");
-
-            File f = new File(baseDir,reportFiles[0]);
-            throw new AbortException(
-                String.format(
-                "Test reports were found but none of them are new. Did leafNodes run? %n"+
-                "For example, %s is %s old%n", f,
-                Util.getTimeSpanString(buildTime-f.lastModified())));
-        }
+        if (LOGGER.isLoggable(Level.FINE)) LOGGER.fine("testSuites size:" + this.getSuites().size());
     }
 
     @Override
@@ -254,52 +268,44 @@ public final class TestResult extends MetaTabulatedResult {
     }
 
     @Deprecated
-    public void parse(long buildTime, Iterable<File> reportFiles) throws IOException {
-        parse(buildTime, reportFiles, null);
+    public void parse(long filesTimestamp, Iterable<File> reportFiles) throws IOException {
+        parse(filesTimestamp, null, reportFiles);
     }
 
     /**
      * Collect reports from the given report files
      *
-     * @param buildTime Build time.
+     * @param filesTimestamp Build time.
      * @param reportFiles Report files.
      * @param pipelineTestDetails A {@link PipelineTestDetails} instance containing Pipeline-related additional arguments.
      *
      * @throws IOException if an error occurs.
      * @since 1.22
      */
-    public void parse(long buildTime, Iterable<File> reportFiles, PipelineTestDetails pipelineTestDetails) throws IOException {
-        boolean parsed=false;
+    public void parse(long filesTimestamp, Iterable<File> reportFiles, PipelineTestDetails pipelineTestDetails) throws IOException {
+        parse(filesTimestamp, pipelineTestDetails, reportFiles);
+    }
 
+    /**
+     * Collect reports from the given report files
+     *
+     * @param reportFiles Report files.
+     * @param pipelineTestDetails A {@link PipelineTestDetails} instance containing Pipeline-related additional arguments.
+     *
+     * @throws IOException if an error occurs.
+     * @deprecated use {@link #parse(long, Iterable, PipelineTestDetails)}
+     */
+    @Deprecated
+    public void parse(Iterable<File> reportFiles, PipelineTestDetails pipelineTestDetails) throws IOException {
         for (File reportFile : reportFiles) {
             // only count files that were actually updated during this build
-            if (buildTime-3000/*error margin*/ <= reportFile.lastModified()) {
-                parsePossiblyEmpty(reportFile, pipelineTestDetails);
-                parsed = true;
-            }
+            parsePossiblyEmpty(reportFile, pipelineTestDetails);
         }
-
-        if(!parsed) {
-            long localTime = System.currentTimeMillis();
-            if(localTime < buildTime-1000) /*margin*/
-                // build time is in the the future. clock on this agent must be running behind
-                throw new AbortException(
-                    "Clock on this agent is out of sync with the controller, and therefore \n" +
-                    "I can't figure out what test results are new and what are old.\n" +
-                    "Please keep the agent clock in sync with the controller.");
-
-            File f = reportFiles.iterator().next();
-            throw new AbortException(
-                String.format(
-                "Test reports were found but none of them are new. Did leafNodes run? %n"+
-                "For example, %s is %s old%n", f,
-                Util.getTimeSpanString(buildTime-f.lastModified())));
-        }
-        
     }
-    
+
     private void parsePossiblyEmpty(File reportFile, PipelineTestDetails pipelineTestDetails) throws IOException {
         if(reportFile.length()==0) {
+            if (LOGGER.isLoggable(Level.FINE)) LOGGER.fine("reportFile:" + reportFile + " is empty");
             // this is a typical problem when JVM quits abnormally, like OutOfMemoryError during a test.
             SuiteResult sr = new SuiteResult(reportFile.getName(), "", "", pipelineTestDetails);
             sr.addCase(new CaseResult(sr,"[empty]","Test report file "+reportFile.getAbsolutePath()+" was length 0"));
@@ -375,8 +381,14 @@ public final class TestResult extends MetaTabulatedResult {
             throw new IllegalStateException("Cannot reparse using a pluggable impl");
         }
         try {
-            for (SuiteResult suiteResult : SuiteResult.parse(reportFile, keepLongStdio, pipelineTestDetails))
+            List<SuiteResult> suiteResults = SuiteResult.parse(reportFile, keepLongStdio, pipelineTestDetails);
+            for (SuiteResult suiteResult : suiteResults)
                 add(suiteResult);
+
+            if (LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.fine("reportFile:" + reportFile + ", lastModified:" + reportFile.lastModified() + " found " + suiteResults.size() + " suite results" );
+            }
+
         } catch (InterruptedException | RuntimeException e) {
             throw new IOException("Failed to read "+reportFile,e);
         } catch (DocumentException e) {
@@ -394,6 +406,7 @@ public final class TestResult extends MetaTabulatedResult {
         }
     }
 
+    @Override
     public String getDisplayName() {
         return Messages.TestResult_getDisplayName();
     }
@@ -713,21 +726,41 @@ public final class TestResult extends MetaTabulatedResult {
         return byPackages.get(packageName);
     }
 
+    /**
+     * Returns the first suite with the given name. Prefer using {@link #getSuites(String)} to disambiguate suites with the same name.
+     * @param name the suite name
+     * @return The first test suite with the given name, or null if not found.
+     */
+    @CheckForNull
     public SuiteResult getSuite(String name) {
-        if (impl != null) {
-            return impl.getSuite(name);
+        Collection<SuiteResult> suiteResults = getSuites(name);
+        if (suiteResults.isEmpty()) {
+            return null;
+        } else {
+            return suiteResults.iterator().next();
         }
-        
-        return suitesByName.get(name);
     }
 
-    @Nonnull
-    public TestResult getResultByNode(@Nonnull String nodeId) {
+    /**
+     * Returns all suites with the given name.
+     * @param name the suite name
+     * @return all suites with the given name
+     */
+    @NonNull
+    public Collection<SuiteResult> getSuites(String name) {
+        if (impl != null) {
+            return Collections.singleton(impl.getSuite(name));
+        }
+        return suitesByName.getOrDefault(name, Collections.emptyList());
+    }
+
+    @NonNull
+    public TestResult getResultByNode(@NonNull String nodeId) {
         return getResultByNodes(Collections.singletonList(nodeId));
     }
 
-    @Nonnull
-    public TestResult getResultByNodes(@Nonnull List<String> nodeIds) {
+    @NonNull
+    public TestResult getResultByNodes(@NonNull List<String> nodeIds) {
         if (impl != null) {
             return impl.getResultByNodes(nodeIds);
         }
@@ -778,7 +811,7 @@ public final class TestResult extends MetaTabulatedResult {
         // Ask all of our children to tally themselves
         for (SuiteResult s : suites) {
             s.setParent(this); // kluge to prevent double-counting the results
-            suitesByName.put(s.getName(),s);
+            suitesByName.merge(s.getName(), Collections.singleton(s), (a,b) -> Stream.concat(a.stream(), b.stream()).collect(Collectors.toList()));
             if (s.getNodeId() != null) {
                 addSuiteByNode(s);
             }
@@ -832,7 +865,7 @@ public final class TestResult extends MetaTabulatedResult {
             if(!s.freeze(this))      // this is disturbing: has-a-parent is conflated with has-been-counted
                 continue;
 
-            suitesByName.put(s.getName(),s);
+            suitesByName.merge(s.getName(), Collections.singleton(s), (a,b) -> Stream.concat(a.stream(), b.stream()).collect(Collectors.toList()));
 
             if (s.getNodeId() != null) {
                 addSuiteByNode(s);
@@ -893,8 +926,8 @@ public final class TestResult extends MetaTabulatedResult {
         }
     }
 
-    @Nonnull
-    public TestResult getResultForPipelineBlock(@Nonnull String blockId) {
+    @NonNull
+    public TestResult getResultForPipelineBlock(@NonNull String blockId) {
         PipelineBlockWithTests block = getPipelineBlockWithTests(blockId);
         if (block != null) {
             return (TestResult)blockToTestResult(block, this);
@@ -903,12 +936,20 @@ public final class TestResult extends MetaTabulatedResult {
         }
     }
 
+    public boolean isSkipOldReports() {
+        return skipOldReports;
+    }
+
+    public void setSkipOldReports(boolean skipOldReports) {
+        this.skipOldReports = skipOldReports;
+    }
+
     /**
      * Get an aggregated {@link TestResult} for all test results in a {@link PipelineBlockWithTests} and any children it may have.
      */
     @Override
-    @Nonnull
-    public TabulatedResult blockToTestResult(@Nonnull PipelineBlockWithTests block, @Nonnull TabulatedResult fullResult) {
+    @NonNull
+    public TabulatedResult blockToTestResult(@NonNull PipelineBlockWithTests block, @NonNull TabulatedResult fullResult) {
         TestResult result = new TestResult();
         for (PipelineBlockWithTests child : block.getChildBlocks().values()) {
             TabulatedResult childResult = blockToTestResult(child, fullResult);
@@ -929,6 +970,17 @@ public final class TestResult extends MetaTabulatedResult {
         return result;
     }
 
+
+
     private static final long serialVersionUID = 1L;
+
+    public CaseResult getCase(String suiteName, String transformedFullDisplayName) {
+        return getSuites(suiteName)
+                .stream()
+                .map(suite -> suite.getCase(transformedFullDisplayName))
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+    }
 
 }

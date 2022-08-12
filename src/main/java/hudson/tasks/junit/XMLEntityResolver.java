@@ -23,7 +23,6 @@
  */
 package hudson.tasks.junit;
 
-import org.apache.commons.lang.StringUtils;
 import org.xml.sax.EntityResolver;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
@@ -53,6 +52,7 @@ public class XMLEntityResolver implements EntityResolver {
     /**
      * Intercepts the lookup of publicId, systemId
      */
+    @Override
     public InputSource resolveEntity(String publicId, String systemId) throws SAXException, IOException {
         if (systemId != null) {
             if (LOGGER.isLoggable(Level.FINE)) {
@@ -61,7 +61,7 @@ public class XMLEntityResolver implements EntityResolver {
             // TestNG system-ids
             if (systemId.startsWith(TESTNG_HTTP_NAMESPACE) || systemId.startsWith(TESTNG_HTTPS_NAMESPACE)) {
                 LOGGER.fine("It's a TestNG document, will try to lookup DTD in classpath");
-                String dtdFileName = StringUtils.substringAfterLast(systemId, "/");
+                String dtdFileName = systemId.substring(systemId.lastIndexOf("/") + 1);
 
                 URL url = getClass().getClassLoader().getResource(dtdFileName);
                 if (url != null)

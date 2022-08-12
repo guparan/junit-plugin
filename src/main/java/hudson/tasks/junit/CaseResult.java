@@ -28,9 +28,7 @@ import io.jenkins.plugins.junit.storage.FileJunitTestResultStorage;
 import io.jenkins.plugins.junit.storage.TestResultImpl;
 import io.jenkins.plugins.junit.storage.JunitTestResultStorage;
 import hudson.util.TextFile;
-import org.apache.commons.collections.iterators.ReverseListIterator;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.StringUtils;
 import org.jvnet.localizer.Localizable;
 
 import hudson.model.Run;
@@ -42,8 +40,8 @@ import org.kohsuke.accmod.restrictions.Beta;
 import org.kohsuke.stapler.Stapler;
 import org.kohsuke.stapler.export.Exported;
 
-import javax.annotation.CheckForNull;
-import javax.annotation.Nonnull;
+import edu.umd.cs.findbugs.annotations.CheckForNull;
+import edu.umd.cs.findbugs.annotations.NonNull;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -254,6 +252,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
         return HALF_MAX_SIZE;
     }
 
+    @Override
     public ClassResult getParent() {
         return classResult;
     }
@@ -304,6 +303,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
         return TestNameTransformer.getTransformedName(getName());
     }
 
+    @Override
     public String getDisplayName() {
         return getNameWithEnclosingBlocks(getTransformedTestName());
     }
@@ -316,7 +316,9 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
             if (r != null) {
                 TestResultAction action = r.getAction(TestResultAction.class);
                 if (action != null && action.getResult().hasMultipleBlocks()) {
-                    return StringUtils.join(new ReverseListIterator(getEnclosingFlowNodeNames()), " / ") + " / " + rawName;
+                    List<String> enclosingFlowNodeNames = getEnclosingFlowNodeNames();
+                    Collections.reverse(enclosingFlowNodeNames);
+                    return String.join(" / ", enclosingFlowNodeNames) + " / " + rawName;
                 }
             }
         }
@@ -331,7 +333,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      */
     @Exported(visibility=999)
     public @Override String getName() {
-        if (StringUtils.isEmpty(testName)) {
+        if (testName == null || testName.isEmpty()) {
             return "(?)";
         }
         return testName;
@@ -349,6 +351,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      * Gets the duration of the test, in seconds
      */
     @Exported(visibility=9)
+    @Override
     public float getDuration() {
         return duration;
     }
@@ -409,6 +412,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
     /**
      * @since 1.515
      */
+    @Override
     public String getFullDisplayName() {
         return getNameWithEnclosingBlocks(getTransformedFullDisplayName());
     }
@@ -436,6 +440,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      * when this test started failing.
      */
     @Exported(visibility=9)
+    @Override
     public int getFailedSince() {
         // If we haven't calculated failedSince yet, and we should,
         // do it now.
@@ -457,6 +462,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
         }
     }
 
+    @Override
     public Run<?,?> getFailedSinceRun() {
         JunitTestResultStorage storage = JunitTestResultStorage.find();
         if (!(storage instanceof FileJunitTestResultStorage)) {
@@ -500,6 +506,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      * @since 1.294
      */
     @Exported
+    @Override
     public String getStdout() {
         if(stdout!=null)    return stdout;
         SuiteResult sr = getSuiteResult();
@@ -514,6 +521,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      * @since 1.294
      */
     @Exported
+    @Override
     public String getStderr() {
         if(stderr!=null)    return stderr;
         SuiteResult sr = getSuiteResult();
@@ -524,9 +532,14 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
     @Override
     public CaseResult getPreviousResult() {
         if (parent == null) return null;
-        SuiteResult pr = parent.getPreviousResult();
-        if(pr==null)    return null;
-        return pr.getCase(getTransformedFullDisplayName());
+
+        TestResult previousResult = parent.getParent().getPreviousResult();
+        if (previousResult == null) return null;
+        if (previousResult instanceof hudson.tasks.junit.TestResult) {
+            hudson.tasks.junit.TestResult pr = (hudson.tasks.junit.TestResult) previousResult;
+            return pr.getCase(parent.getName(), getTransformedFullDisplayName());
+        }
+        return null;
     }
 
     /**
@@ -582,6 +595,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      * If there was an error or a failure, this is the stack trace, or otherwise null.
      */
     @Exported
+    @Override
     public String getErrorStackTrace() {
         return errorStackTrace;
     }
@@ -590,6 +604,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
      * If there was an error or a failure, this is the text from the message.
      */
     @Exported
+    @Override
     public String getErrorDetails() {
         return errorDetails;
     }
@@ -597,6 +612,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
     /**
      * @return true if the test was not skipped and did not fail, false otherwise.
      */
+    @Override
     public boolean isPassed() {
         return !skipped && errorDetails == null && errorStackTrace==null;
     }
@@ -642,7 +658,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
         return null;
     }
 
-    @Nonnull
+    @NonNull
     public List<String> getEnclosingFlowNodeIds() {
         List<String> enclosing = new ArrayList<>();
         if (parent != null) {
@@ -651,7 +667,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
         return enclosing;
     }
 
-    @Nonnull
+    @NonNull
     public List<String> getEnclosingFlowNodeNames() {
         List<String> enclosing = new ArrayList<>();
         if (parent != null) {
@@ -688,6 +704,7 @@ public class CaseResult extends TestResult implements Comparable<CaseResult> {
         recomputeFailedSinceIfNeeded();
     }
     
+    @Override
     public int compareTo(CaseResult that) {
         if (this == that) {
             return 0;

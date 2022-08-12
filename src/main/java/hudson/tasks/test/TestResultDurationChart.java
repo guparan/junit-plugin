@@ -28,9 +28,7 @@ public class TestResultDurationChart {
     }
 
     private LinesChartModel getLinesChartModel(LinesDataSet dataSet) {
-        LinesChartModel model = new LinesChartModel();
-        model.setDomainAxisLabels(dataSet.getDomainAxisLabels());
-        model.setBuildNumbers(dataSet.getBuildNumbers());
+        LinesChartModel model = new LinesChartModel(dataSet);
 
         LineSeries duration = new LineSeries(MILLISECONDS, Palette.GREEN.getNormal(),
                 LineSeries.StackedMode.STACKED, LineSeries.FilledMode.FILLED);

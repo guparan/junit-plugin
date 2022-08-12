@@ -51,7 +51,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import javax.annotation.Nullable;
+import edu.umd.cs.findbugs.annotations.Nullable;
 import jenkins.tasks.SimpleBuildStep;
 
 /**
@@ -239,6 +239,7 @@ public class TestResultAction extends AbstractTestResultAction<TestResultAction>
         return r;
     }
 
+    @Override
     public Object getTarget() {
         return getResult();
     }
@@ -313,6 +314,7 @@ public class TestResultAction extends AbstractTestResultAction<TestResultAction>
     	public abstract List<? extends TestAction> getTestAction(hudson.tasks.junit.TestObject testObject);
     }
 
+    @Override
     public Object readResolve() {
         super.readResolve(); // let it do the post-deserialization work
     	if (testData == null) {

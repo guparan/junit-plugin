@@ -50,8 +50,6 @@ import io.jenkins.plugins.junit.checks.JUnitChecksPublisher;
 import io.jenkins.plugins.junit.storage.FileJunitTestResultStorage;
 import io.jenkins.plugins.junit.storage.JunitTestResultStorage;
 import jenkins.tasks.SimpleBuildStep;
-import org.apache.commons.collections.iterators.ReverseListIterator;
-import org.apache.commons.lang.StringUtils;
 import org.apache.tools.ant.DirectoryScanner;
 import org.apache.tools.ant.types.FileSet;
 import org.kohsuke.stapler.AncestorInPath;
@@ -59,11 +57,13 @@ import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
 
-import javax.annotation.Nonnull;
+import edu.umd.cs.findbugs.annotations.NonNull;
+import hudson.Functions;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.logging.Logger;
 
 /**
  * Generates HTML report from JUnit test result XML files.
@@ -71,6 +71,8 @@ import java.util.List;
  * @author Kohsuke Kawaguchi
  */
 public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JUnitTask {
+
+    private static final Logger LOGGER = Logger.getLogger(JUnitResultArchiver.class.getName());
 
     /**
      * {@link FileSet} "includes" string, like "foo/bar/*.xml"
@@ -102,6 +104,8 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
      * If true, the run won't be marked as unstable if there are failing tests. Only the stage will be marked as unstable.
      */
     private boolean skipMarkingBuildUnstable;
+
+    private boolean skipOldReports;
 
     private static final String DEFAULT_CHECKS_NAME = "Tests";
 
@@ -138,18 +142,18 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
     }
 
     @Deprecated
-    private TestResult parse(String expandedTestResults, Run<?,?> run, @Nonnull FilePath workspace, Launcher launcher, TaskListener listener)
+    private TestResult parse(String expandedTestResults, Run<?,?> run, @NonNull FilePath workspace, Launcher launcher, TaskListener listener)
             throws IOException, InterruptedException
     {
         return parse(this, null, expandedTestResults, run, workspace, launcher, listener);
 
     }
 
-    private static TestResult parse(@Nonnull JUnitTask task, PipelineTestDetails pipelineTestDetails,
-                                    String expandedTestResults, Run<?,?> run, @Nonnull FilePath workspace,
+    private static TestResult parse(@NonNull JUnitTask task, PipelineTestDetails pipelineTestDetails,
+                                    String expandedTestResults, Run<?,?> run, @NonNull FilePath workspace,
                                     Launcher launcher, TaskListener listener)
             throws IOException, InterruptedException {
-        return new JUnitParser(task.isKeepLongStdio(), task.isAllowEmptyResults())
+        return new JUnitParser(task.isKeepLongStdio(), task.isAllowEmptyResults(), task.isSkipOldReports())
                 .parseResult(expandedTestResults, run, pipelineTestDetails, workspace, launcher, listener);
     }
 
@@ -174,7 +178,7 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
 
     /** @deprecated use {@link #parseAndSummarize} instead */
     @Deprecated
-    public static TestResultAction parseAndAttach(@Nonnull JUnitTask task, PipelineTestDetails pipelineTestDetails,
+    public static TestResultAction parseAndAttach(@NonNull JUnitTask task, PipelineTestDetails pipelineTestDetails,
                                                   Run build, FilePath workspace, Launcher launcher, TaskListener listener)
             throws InterruptedException, IOException {
         listener.getLogger().println(Messages.JUnitResultArchiver_Recording());
@@ -231,7 +235,7 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
         }
     }
 
-    public static TestResultSummary parseAndSummarize(@Nonnull JUnitTask task, PipelineTestDetails pipelineTestDetails,
+    public static TestResultSummary parseAndSummarize(@NonNull JUnitTask task, PipelineTestDetails pipelineTestDetails,
                                                   Run<?, ?> build, FilePath workspace, Launcher launcher, TaskListener listener)
             throws InterruptedException, IOException {
         JunitTestResultStorage storage = JunitTestResultStorage.find();
@@ -248,7 +252,8 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
             summary = null; // see below
         } else {
             result = new TestResult(storage.load(build.getParent().getFullName(), build.getNumber())); // irrelevant
-            summary = new JUnitParser(task.isKeepLongStdio(), task.isAllowEmptyResults()).summarizeResult(testResults, build, pipelineTestDetails, workspace, launcher, listener, storage);
+            summary = new JUnitParser(task.isKeepLongStdio(), task.isAllowEmptyResults(), task.isSkipOldReports())
+                    .summarizeResult(testResults, build, pipelineTestDetails, workspace, launcher, listener, storage);
         }
 
         synchronized (build) {
@@ -302,12 +307,17 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
                 if (checksName == null && pipelineTestDetails != null) {
                     List<String> checksComponents = new ArrayList<>(pipelineTestDetails.getEnclosingBlockNames());
                     checksComponents.add(DEFAULT_CHECKS_NAME);
-                    checksName = StringUtils.join(new ReverseListIterator(checksComponents), " / ");
+                    Collections.reverse(checksComponents);
+                    checksName = String.join(" / ", checksComponents);
                 }
                 if (Util.fixEmpty(checksName) == null) {
                     checksName = DEFAULT_CHECKS_NAME;
                 }
-                new JUnitChecksPublisher(build, checksName, result, summary).publishChecks(listener);
+                try {
+                    new JUnitChecksPublisher(build, checksName, result, summary).publishChecks(listener);
+                } catch (Exception x) {
+                    Functions.printStackTrace(x, listener.error("Publishing JUnit checks failed:"));
+                }
             }
 
             return summary;
@@ -328,14 +338,17 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
         return new TestResult(buildTime, ds);
     }
 
+    @Override
     public BuildStepMonitor getRequiredMonitorService() {
         return BuildStepMonitor.NONE;
     }
 
+    @Override
     public String getTestResults() {
         return testResults;
     }
 
+    @Override
     public double getHealthScaleFactor() {
         return healthScaleFactor == null ? 1.0 : healthScaleFactor;
     }
@@ -349,7 +362,9 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
         this.healthScaleFactor = Math.max(0.0, healthScaleFactor);
     }
 
-    public @Nonnull List<TestDataPublisher> getTestDataPublishers() {
+    @NonNull
+    @Override
+    public List<TestDataPublisher> getTestDataPublishers() {
         return testDataPublishers == null ? Collections.emptyList() : testDataPublishers;
     }
 
@@ -358,7 +373,7 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
      *
      * @since 1.2
      */
-    @DataBoundSetter public final void setTestDataPublishers(@Nonnull List<TestDataPublisher> testDataPublishers) {
+    @DataBoundSetter public final void setTestDataPublishers(@NonNull List<TestDataPublisher> testDataPublishers) {
         this.testDataPublishers = new DescribableList<>(Saveable.NOOP);
         this.testDataPublishers.addAll(testDataPublishers);
     }
@@ -366,6 +381,7 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
     /**
      * @return the keepLongStdio.
      */
+    @Override
     public boolean isKeepLongStdio() {
         return keepLongStdio;
     }
@@ -383,6 +399,7 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
      *
      * @return the allowEmptyResults
      */
+    @Override
     public boolean isAllowEmptyResults() {
         return allowEmptyResults;
     }
@@ -425,10 +442,21 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
         this.skipMarkingBuildUnstable = skipMarkingBuildUnstable;
     }
 
+    @Override
+    public boolean isSkipOldReports() {
+        return this.skipOldReports;
+    }
+
+    @DataBoundSetter
+    public void setSkipOldReports(boolean skipOldReports) {
+        this.skipOldReports = skipOldReports;
+    }
+
     private static final long serialVersionUID = 1L;
 
     @Extension
     public static class DescriptorImpl extends BuildStepDescriptor<Publisher> {
+        @Override
         public String getDisplayName() {
             return Messages.JUnitResultArchiver_DisplayName();
         }
@@ -450,6 +478,7 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
             return FilePath.validateFileMask(project.getSomeWorkspace(), value);
         }
 
+        @Override
         public boolean isApplicable(Class<? extends AbstractProject> jobType) {
             return true;
         }

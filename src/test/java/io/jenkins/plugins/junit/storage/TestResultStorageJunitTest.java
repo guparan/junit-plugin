@@ -63,12 +63,13 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import hudson.tasks.junit.HistoryTestResultSummary;
 import jenkins.model.Jenkins;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.jenkinsci.plugins.database.Database;
 import org.jenkinsci.plugins.database.GlobalDatabaseConfiguration;
 import org.jenkinsci.plugins.database.h2.LocalH2Database;
@@ -101,6 +102,8 @@ import static org.junit.Assert.assertNotNull;
 
 public class TestResultStorageJunitTest {
 
+    private static final Logger LOGGER = Logger.getLogger(TestResultStorageJunitTest.class.getName());
+    
     @ClassRule public static BuildWatcher buildWatcher = new BuildWatcher();
 
     @Rule public JenkinsRule r = new JenkinsRule();
@@ -800,17 +803,17 @@ public class TestResultStorageJunitTest {
                                     statement.setNull(8, Types.VARCHAR);
                                 }
                                 statement.setFloat(9, caseResult.getDuration());
-                                if (StringUtils.isNotEmpty(caseResult.getStdout())) {
+                                if (caseResult.getStdout() != null && !caseResult.getStdout().isEmpty()) {
                                     statement.setString(10, caseResult.getStdout());
                                 } else {
                                     statement.setNull(10, Types.VARCHAR);
                                 }
-                                if (StringUtils.isNotEmpty(caseResult.getStderr())) {
+                                if (caseResult.getStderr() != null && !caseResult.getStderr().isEmpty()) {
                                     statement.setString(11, caseResult.getStderr());
                                 } else {
                                     statement.setNull(11, Types.VARCHAR);
                                 }
-                                if (StringUtils.isNotEmpty(caseResult.getErrorStackTrace())) {
+                                if (caseResult.getErrorStackTrace() != null && !caseResult.getErrorStackTrace().isEmpty()) {
                                     statement.setString(12, caseResult.getErrorStackTrace());
                                 } else {
                                     statement.setNull(12, Types.VARCHAR);
@@ -881,6 +884,10 @@ public class TestResultStorageJunitTest {
             private static final XStream XSTREAM = new XStream();
             private final String databaseXml;
 
+            static {
+                XSTREAM.allowTypes(new Class[] {LocalH2Database.class});
+            }
+
             RemoteConnectionSupplier() {
                 databaseXml = XSTREAM.toXML(GlobalDatabaseConfiguration.get().getDatabase());
             }
@@ -895,24 +902,26 @@ public class TestResultStorageJunitTest {
 
     // https://gist.github.com/mikbuch/299568988fa7997cb28c7c84309232b1
     private static void printResultSet(ResultSet rs) throws SQLException {
+        StringBuilder sb = new StringBuilder();
         ResultSetMetaData rsmd = rs.getMetaData();
         int columnsNumber = rsmd.getColumnCount();
         for (int i = 1; i <= columnsNumber; i++) {
             if (i > 1) {
-                System.out.print("\t|\t");
+                sb.append("\t|\t");
             }
-            System.out.print(rsmd.getColumnName(i));
+            sb.append(rsmd.getColumnName(i));
         }
-        System.out.println();
+        sb.append('\n');
         while (rs.next()) {
             for (int i = 1; i <= columnsNumber; i++) {
                 if (i > 1) {
-                    System.out.print("\t|\t");
+                    sb.append("\t|\t");
                 }
-                System.out.print(rs.getString(i));
+                sb.append(rs.getString(i));
             }
-            System.out.println();
+            sb.append('\n');
         }
+        LOGGER.log(Level.INFO, sb.toString());
     }
 
 }

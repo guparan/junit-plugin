@@ -47,7 +47,10 @@ import hudson.util.HttpResponses;
 import org.apache.commons.io.FileUtils;
 import org.jenkinsci.plugins.structs.describable.DescribableModel;
 import org.junit.Assume;
+import org.junit.ClassRule;
+import org.jvnet.hudson.test.BuildWatcher;
 import org.jvnet.hudson.test.Issue;
+import org.jvnet.hudson.test.LoggerRule;
 import org.jvnet.hudson.test.TouchBuilder;
 import org.jvnet.hudson.test.recipes.LocalData;
 
@@ -65,12 +68,14 @@ import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.Builder;
+import hudson.tasks.test.helper.WebClientFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.Collections;
 import java.util.List;
+import java.util.logging.Level;
 
 import org.junit.Before;
 import org.junit.Rule;
@@ -95,6 +100,13 @@ import static org.junit.Assert.fail;
 public class JUnitResultArchiverTest {
 
     @Rule public JenkinsRule j = new JenkinsRule();
+
+    @Rule
+    public LoggerRule logRule = new LoggerRule().recordPackage(JUnitResultArchiver.class, Level.FINE);
+
+    @ClassRule
+    public final static BuildWatcher buildWatcher = new BuildWatcher();
+
     private FreeStyleProject project;
     private JUnitResultArchiver archiver;
 
@@ -102,39 +114,40 @@ public class JUnitResultArchiverTest {
         project = j.createFreeStyleProject("junit");
         archiver = new JUnitResultArchiver("*.xml");
         project.getPublishersList().add(archiver);
-
         project.getBuildersList().add(new TouchBuilder());
     }
 
     @LocalData("All")
     @Test public void basic() throws Exception {
-        FreeStyleBuild build = project.scheduleBuild2(0).get(10, TimeUnit.SECONDS);
+        FreeStyleBuild build =
+                j.assertBuildStatus(Result.UNSTABLE, j.waitForCompletion(project.scheduleBuild2(0).waitForStart()));
 
         assertTestResults(build);
 
-        WebClient wc = j.new WebClient();
+        WebClient wc = WebClientFactory.createWebClientWithDisabledJavaScript(j);
         wc.getPage(project); // project page
         wc.getPage(build); // build page
         wc.getPage(build, "testReport");  // test report
         wc.getPage(build, "testReport/hudson.security"); // package
         wc.getPage(build, "testReport/hudson.security/HudsonPrivateSecurityRealmTest/"); // class
         wc.getPage(build, "testReport/hudson.security/HudsonPrivateSecurityRealmTest/testDataCompatibilityWith1_282/"); // method
-
-
     }
 
    @LocalData("All")
    @Test public void slave() throws Exception {
-       Assume.assumeFalse("TODO frequent TimeoutException from basic", Functions.isWindows());
-        DumbSlave s = j.createOnlineSlave();
-        project.setAssignedLabel(s.getSelfLabel());
+        Assume.assumeFalse("TODO frequent TimeoutException from basic", Functions.isWindows());
+        DumbSlave node = j.createSlave("label1 label2", null);
+        // the node needs to be online before showAgentLogs
+        j.waitOnline(node);
+        j.showAgentLogs(node, logRule);
+        project.setAssignedLabel(j.jenkins.getLabel("label1"));
 
         FilePath src = new FilePath(j.jenkins.getRootPath(), "jobs/junit/workspace/");
         assertNotNull(src);
-        FilePath dest = s.getWorkspaceFor(project);
+        FilePath dest = node.getWorkspaceFor(project);
         assertNotNull(dest);
         src.copyRecursiveTo("*.xml", dest);
-
+        assertEquals(56, dest.list("*.xml").length);
         basic();
     }
 
@@ -224,8 +237,9 @@ public class JUnitResultArchiverTest {
     }
     private void doRepeatedArchiving(boolean slave) throws Exception {
         if (slave) {
-            DumbSlave s = j.createOnlineSlave();
-            project.setAssignedLabel(s.getSelfLabel());
+            DumbSlave s = j.createSlave("label1 label2", null);
+            project.setAssignedLabel(j.jenkins.getLabel("label1"));
+            j.waitOnline(s);
         }
         project.getPublishersList().removeAll(JUnitResultArchiver.class);
         project.getBuildersList().add(new SimpleArchive("A", 7, 0));
@@ -265,6 +279,7 @@ public class JUnitResultArchiverTest {
                 pw.println("</testsuite>");
                 pw.flush();
             }
+            ws.touch(build.getTimeInMillis()+1);
             new JUnitResultArchiver(name + ".xml").perform(build, ws, launcher, listener);
             return true;
         }
@@ -281,7 +296,7 @@ public class JUnitResultArchiverTest {
     @Test public void configRoundTrip() throws Exception {
         JUnitResultArchiver a = new JUnitResultArchiver("TEST-*.xml");
         a.setKeepLongStdio(true);
-        a.setTestDataPublishers(Collections.<TestDataPublisher>singletonList(new MockTestDataPublisher("testing")));
+        a.setTestDataPublishers(Collections.singletonList(new MockTestDataPublisher("testing")));
         a.setHealthScaleFactor(0.77);
         a = j.configRoundtrip(a);
         assertEquals("TEST-*.xml", a.getTestResults());
@@ -381,15 +396,15 @@ public class JUnitResultArchiverTest {
         WebClient wc = j.createWebClient();
         HtmlPage page = wc.getPage(b, "testReport");
 
-        assertThat(page.asText(), not(containsString(EXPECTED)));
+        assertThat(page.asNormalizedText(), not(containsString(EXPECTED)));
 
         ((HtmlAnchor) page.getElementById(ID_PREFIX + "-showlink")).click();
         wc.waitForBackgroundJavaScript(10000L);
-        assertThat(page.asText(), containsString(EXPECTED));
+        assertThat(page.asNormalizedText(), containsString(EXPECTED));
 
         ((HtmlAnchor) page.getElementById(ID_PREFIX + "-hidelink")).click();
         wc.waitForBackgroundJavaScript(10000L);
-        assertThat(page.asText(), not(containsString(EXPECTED)));
+        assertThat(page.asNormalizedText(), not(containsString(EXPECTED)));
     }
 
     @Issue("JENKINS-26535")
@@ -423,43 +438,43 @@ public class JUnitResultArchiverTest {
 
         assertEquals(described, model.uninstantiate(model.instantiate(described)));
     }
-    
+
     @Test
     @Issue("SECURITY-521")
     public void testXxe() throws Exception {
         String oobInUserContentLink = j.getURL() + "userContent/oob.xml";
         String triggerLink = j.getURL() + "triggerMe";
-        
+
         String xxeFile = this.getClass().getResource("testXxe-xxe.xml").getFile();
         String xxeFileContent = FileUtils.readFileToString(new File(xxeFile), StandardCharsets.UTF_8);
         String adaptedXxeFileContent = xxeFileContent.replace("$OOB_LINK$", oobInUserContentLink);
-        
+
         String oobFile = this.getClass().getResource("testXxe-oob.xml").getFile();
         String oobFileContent = FileUtils.readFileToString(new File(oobFile), StandardCharsets.UTF_8);
         String adaptedOobFileContent = oobFileContent.replace("$TARGET_URL$", triggerLink);
-        
+
         File userContentDir = new File(j.jenkins.getRootDir(), "userContent");
         FileUtils.writeStringToFile(new File(userContentDir, "oob.xml"), adaptedOobFileContent);
-        
+
         FreeStyleProject project = j.createFreeStyleProject();
         DownloadBuilder builder = new DownloadBuilder();
         builder.fileContent = adaptedXxeFileContent;
         project.getBuildersList().add(builder);
-        
+
         JUnitResultArchiver publisher = new JUnitResultArchiver("xxe.xml");
         project.getPublishersList().add(publisher);
-    
+
         project.scheduleBuild2(0).get();
         // UNSTABLE
         // assertEquals(Result.SUCCESS, project.scheduleBuild2(0).get().getResult());
-        
+
         YouCannotTriggerMe urlHandler = j.jenkins.getExtensionList(UnprotectedRootAction.class).get(YouCannotTriggerMe.class);
         assertEquals(0, urlHandler.triggerCount);
     }
-    
+
     public static class DownloadBuilder extends Builder {
         String fileContent;
-        
+
         @Override
         public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener) {
             try {
@@ -467,43 +482,43 @@ public class JUnitResultArchiverTest {
             } catch (IOException e) {
                 return false;
             }
-            
+
             return true;
         }
-        
+
         @Extension
         public static class DescriptorImpl extends BuildStepDescriptor<Builder> {
             @Override
             public boolean isApplicable(Class<? extends AbstractProject> jobType) {
                 return true;
             }
-            
+
             @Override
             public String getDisplayName() {
                 return null;
             }
         }
     }
-    
+
     @TestExtension("testXxe")
     public static class YouCannotTriggerMe implements UnprotectedRootAction {
         private int triggerCount = 0;
-        
+
         @Override
         public String getIconFileName() {
             return null;
         }
-        
+
         @Override
         public String getDisplayName() {
             return null;
         }
-        
+
         @Override
         public String getUrlName() {
             return "triggerMe";
         }
-        
+
         public HttpResponse doIndex() {
             triggerCount++;
             return HttpResponses.plainText("triggered");
